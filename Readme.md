@@ -140,6 +140,7 @@ See `config.json` for a full example.
 |--------------------|---------------------------------------------------|----------------|
 | `queue`            | Queue name to declare and consume from            | `bridge_queue` |
 | `durable`          | Queue durability (`true`/`false`)                 | `true`         |
+| `auto_delete`      | Queue auto-delete flag (`true`/`false`)           | `false`        |
 | `prefetch_count`   | QoS prefetch count                                | `10`           |
 | `bindings`         | Array of `{ exchange, binding_key }` pairs        | *(required)*   |
 

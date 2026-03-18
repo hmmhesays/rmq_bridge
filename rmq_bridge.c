@@ -119,6 +119,7 @@ typedef struct {
     char        queue[256];
     int         prefetch_count;
     int         queue_durable;
+    int         queue_auto_delete;
     binding_t  *bindings;
     int         binding_count;
 } source_cfg_t;
@@ -215,8 +216,9 @@ static int parse_config(const char *path, config_t *cfg)
     parse_conn(src, &cfg->source.conn);
     snprintf(cfg->source.queue, sizeof(cfg->source.queue), "%s",
              json_str(src, "queue", "bridge_queue"));
-    cfg->source.prefetch_count = json_int(src, "prefetch_count", 10);
-    cfg->source.queue_durable  = json_bool(src, "durable", 1);
+    cfg->source.prefetch_count    = json_int(src, "prefetch_count", 10);
+    cfg->source.queue_durable     = json_bool(src, "durable", 1);
+    cfg->source.queue_auto_delete = json_bool(src, "auto_delete", 0);
 
     /* bindings */
     const cJSON *bindings = cJSON_GetObjectItemCaseSensitive(src, "bindings");
@@ -418,14 +420,15 @@ int main(int argc, char *argv[])
                        /* passive */ 0,
                        /* durable */ cfg.source.queue_durable,
                        /* exclusive */ 0,
-                       /* auto_delete */ 0,
+                       /* auto_delete */ cfg.source.queue_auto_delete,
                        amqp_empty_table);
     if (check_amqp_reply(src_conn, "queue_declare") != 0) {
         amqp_disconnect(src_conn, "source");
         free(cfg.source.bindings);
         return EXIT_FAILURE;
     }
-    LOG_INFO("declared queue '%s' (durable=%d)", cfg.source.queue, cfg.source.queue_durable);
+    LOG_INFO("declared queue '%s' (durable=%d, auto_delete=%d)",
+             cfg.source.queue, cfg.source.queue_durable, cfg.source.queue_auto_delete);
 
     /* Bind queue to each exchange */
     for (int i = 0; i < cfg.source.binding_count; i++) {

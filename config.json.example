@@ -11,6 +11,7 @@
         "connection_timeout": 10,
         "queue": "bridge_queue",
         "durable": true,
+        "auto_delete": false,
         "prefetch_count": 10,
         "bindings": [
             { "exchange": "orders",        "binding_key": "orders.*.created" },
