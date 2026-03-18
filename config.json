@@ -1,0 +1,36 @@
+{
+    "log_file": "/var/log/rmq_bridge.log",
+
+    "source": {
+        "host": "source-rabbitmq.example.com",
+        "port": 5672,
+        "vhost": "/",
+        "username": "guest",
+        "password": "guest",
+        "heartbeat": 60,
+        "connection_timeout": 10,
+        "queue": "bridge_queue",
+        "durable": true,
+        "prefetch_count": 10,
+        "bindings": [
+            { "exchange": "orders",        "binding_key": "orders.*.created" },
+            { "exchange": "payments",       "binding_key": "payments.#" },
+            { "exchange": "notifications",  "binding_key": "*.critical" }
+        ]
+    },
+
+    "destination": {
+        "host": "dest-rabbitmq.example.com",
+        "port": 5672,
+        "vhost": "/",
+        "username": "guest",
+        "password": "guest",
+        "heartbeat": 60,
+        "connection_timeout": 10,
+        "exchange": "bridge_inbound",
+        "exchange_durable": true,
+        "exchange_auto_delete": false,
+        "exchange_internal": false,
+        "persistent": true
+    }
+}
