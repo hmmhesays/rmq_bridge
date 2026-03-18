@@ -1,5 +1,6 @@
 {
     "log_file": "/var/log/rmq_bridge.log",
+    "debug_log_file": "",
 
     "source": {
         "host": "source-rabbitmq.example.com",

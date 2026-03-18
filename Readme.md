@@ -101,10 +101,31 @@ systemctl enable --now rmq_bridge
 
 ## Usage
 
-### Standalone
+```
+./rmq_bridge -c <config.json> [-l <logfile>] [-d <debuglog>] [-h]
+```
+
+### Command line options
+
+| Flag       | Description                                          | Required |
+|------------|------------------------------------------------------|----------|
+| `-c <path>`| Configuration file                                   | Yes      |
+| `-l <path>`| Log file (overrides `log_file` in config)            | No       |
+| `-d <path>`| Debug payload log (overrides `debug_log_file` in config) | No   |
+| `-h`       | Show help message                                    | No       |
+
+Command line flags take precedence over config file values. This allows
+quick debugging without editing the config:
 
 ```bash
-./rmq_bridge /path/to/config.json
+# Production (paths from config)
+./rmq_bridge -c /opt/rmq_bridge/config.json
+
+# Quick debug session (override debug log from CLI)
+./rmq_bridge -c /opt/rmq_bridge/config.json -d /tmp/debug.log
+
+# Override both logs
+./rmq_bridge -c /opt/rmq_bridge/config.json -l /tmp/rmq.log -d /tmp/debug.log
 ```
 
 ### As a systemd service
@@ -112,7 +133,7 @@ systemctl enable --now rmq_bridge
 ```bash
 systemctl start rmq_bridge      # start
 systemctl stop rmq_bridge       # graceful shutdown (SIGTERM)
-systemctl reload rmq_bridge     # reopen log file (SIGHUP)
+systemctl reload rmq_bridge     # reopen log files (SIGHUP)
 systemctl restart rmq_bridge    # full restart
 systemctl status rmq_bridge     # check status
 journalctl -u rmq_bridge -f     # follow journal output
@@ -156,9 +177,26 @@ See `config.json` for a full example.
 
 ### Global settings
 
-| Field      | Description                                          | Default  |
-|------------|------------------------------------------------------|----------|
-| `log_file` | Path to log file (empty string = stderr)             | `""`     |
+| Field             | Description                                          | Default  |
+|-------------------|------------------------------------------------------|----------|
+| `log_file`        | Path to log file (empty string = stderr)             | `""`     |
+| `debug_log_file`  | Path to debug payload log (empty = disabled)         | `""`     |
+
+## Debug Payload Log
+
+When enabled (via config or `-d` flag), every consumed message is logged with
+full AMQP properties and the complete message body. Each entry includes:
+
+- Timestamp, exchange, routing key, delivery tag, redelivered flag, consumer tag
+- All AMQP basic properties: content_type, content_encoding, delivery_mode,
+  priority, correlation_id, reply_to, expiration, message_id, timestamp, type,
+  user_id, app_id, cluster_id, and headers table entries
+- Full message payload
+
+This log is intended for debugging and should not be left enabled in production
+on high-throughput systems as it will grow rapidly.
+
+SIGHUP reopens both the main log and the debug log, so both can be rotated.
 
 ## Signals
 
@@ -166,14 +204,14 @@ See `config.json` for a full example.
 |---------|-----------------------------------------------------|
 | SIGTERM | Finish current message, then graceful shutdown      |
 | SIGINT  | Same as SIGTERM                                     |
-| SIGHUP  | Close and reopen log file (for logrotate)           |
+| SIGHUP  | Close and reopen all log files (for logrotate)      |
 
 ## Log Rotation
 
 Example `/etc/logrotate.d/rmq_bridge`:
 
 ```
-/var/log/rmq_bridge.log {
+/var/log/rmq_bridge.log /var/log/rmq_bridge_debug.log {
     daily
     rotate 7
     compress

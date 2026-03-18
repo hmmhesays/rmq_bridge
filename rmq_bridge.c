@@ -9,14 +9,14 @@
  *     RabbitMQ instance, preserving the original routing key
  *
  * Signals:
- *   SIGTERM / SIGINT  – graceful shutdown after current message
- *   SIGHUP            – reopen log file (for log rotation)
+ *   SIGTERM / SIGINT  - graceful shutdown after current message
+ *   SIGHUP            - reopen log files (for log rotation)
  *
  * Build:
  *   gcc -o rmq_bridge rmq_bridge.c -lrabbitmq -lcjson -lpthread
  *
  * Usage:
- *   ./rmq_bridge /path/to/config.json
+ *   ./rmq_bridge -c /path/to/config.json [-l /path/to/logfile] [-d /path/to/debuglog]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -29,6 +29,7 @@
 #include <time.h>
 #include <errno.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <sys/time.h>
 
 #include <rabbitmq-c/amqp.h>
@@ -50,6 +51,9 @@ static void handle_hup(int sig)  { (void)sig; g_reopen_log = 1; }
 static FILE *g_logfp = NULL;
 static char  g_log_path[1024] = {0};
 
+static FILE *g_dbgfp = NULL;
+static char  g_dbg_path[1024] = {0};
+
 static void log_open(void)
 {
     if (g_log_path[0] == '\0') {
@@ -64,11 +68,31 @@ static void log_open(void)
     }
 }
 
+static void dbg_open(void)
+{
+    if (g_dbg_path[0] == '\0') {
+        g_dbgfp = NULL;
+        return;
+    }
+    g_dbgfp = fopen(g_dbg_path, "a");
+    if (!g_dbgfp) {
+        fprintf(stderr, "WARN: cannot open debug log '%s': %s, debug logging disabled\n",
+                g_dbg_path, strerror(errno));
+    }
+}
+
 static void log_reopen(void)
 {
     if (g_logfp && g_logfp != stderr)
         fclose(g_logfp);
     log_open();
+}
+
+static void dbg_reopen(void)
+{
+    if (g_dbgfp)
+        fclose(g_dbgfp);
+    dbg_open();
 }
 
 static void log_msg(const char *level, const char *fmt, ...)
@@ -95,6 +119,153 @@ static void log_msg(const char *level, const char *fmt, ...)
 #define LOG_INFO(...)  log_msg("INFO",  __VA_ARGS__)
 #define LOG_WARN(...)  log_msg("WARN",  __VA_ARGS__)
 #define LOG_ERROR(...) log_msg("ERROR", __VA_ARGS__)
+
+/* ------------------------------------------------------------------ */
+/*  Debug payload logging (NDJSON — one JSON object per line)          */
+/* ------------------------------------------------------------------ */
+
+/* Helper: create a cJSON string from amqp_bytes_t, or NULL if empty */
+static cJSON *amqp_bytes_to_json(amqp_bytes_t b)
+{
+    if (!b.bytes || b.len == 0)
+        return cJSON_CreateString("");
+    /* Temporary NUL-terminated copy */
+    char *tmp = malloc(b.len + 1);
+    if (!tmp) return cJSON_CreateString("");
+    memcpy(tmp, b.bytes, b.len);
+    tmp[b.len] = '\0';
+    cJSON *s = cJSON_CreateString(tmp);
+    free(tmp);
+    return s;
+}
+
+static void debug_log_message(const amqp_envelope_t *env)
+{
+    if (!g_dbgfp) return;
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+
+    /* Timestamp */
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    char ts[64];
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tm_buf);
+    cJSON_AddStringToObject(root, "log_timestamp", ts);
+
+    /* Envelope fields */
+    cJSON_AddItemToObject(root, "exchange", amqp_bytes_to_json(env->exchange));
+    cJSON_AddItemToObject(root, "routing_key", amqp_bytes_to_json(env->routing_key));
+    cJSON_AddNumberToObject(root, "delivery_tag", (double)env->delivery_tag);
+    cJSON_AddBoolToObject(root, "redelivered", env->redelivered);
+    cJSON_AddItemToObject(root, "consumer_tag", amqp_bytes_to_json(env->consumer_tag));
+
+    /* AMQP Basic Properties */
+    const amqp_basic_properties_t *p = &env->message.properties;
+    amqp_flags_t f = p->_flags;
+
+    cJSON *props = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "properties", props);
+
+    if (f & AMQP_BASIC_CONTENT_TYPE_FLAG)
+        cJSON_AddItemToObject(props, "content_type", amqp_bytes_to_json(p->content_type));
+    if (f & AMQP_BASIC_CONTENT_ENCODING_FLAG)
+        cJSON_AddItemToObject(props, "content_encoding", amqp_bytes_to_json(p->content_encoding));
+    if (f & AMQP_BASIC_DELIVERY_MODE_FLAG)
+        cJSON_AddNumberToObject(props, "delivery_mode", p->delivery_mode);
+    if (f & AMQP_BASIC_PRIORITY_FLAG)
+        cJSON_AddNumberToObject(props, "priority", p->priority);
+    if (f & AMQP_BASIC_CORRELATION_ID_FLAG)
+        cJSON_AddItemToObject(props, "correlation_id", amqp_bytes_to_json(p->correlation_id));
+    if (f & AMQP_BASIC_REPLY_TO_FLAG)
+        cJSON_AddItemToObject(props, "reply_to", amqp_bytes_to_json(p->reply_to));
+    if (f & AMQP_BASIC_EXPIRATION_FLAG)
+        cJSON_AddItemToObject(props, "expiration", amqp_bytes_to_json(p->expiration));
+    if (f & AMQP_BASIC_MESSAGE_ID_FLAG)
+        cJSON_AddItemToObject(props, "message_id", amqp_bytes_to_json(p->message_id));
+    if (f & AMQP_BASIC_TIMESTAMP_FLAG)
+        cJSON_AddNumberToObject(props, "timestamp", (double)p->timestamp);
+    if (f & AMQP_BASIC_TYPE_FLAG)
+        cJSON_AddItemToObject(props, "type", amqp_bytes_to_json(p->type));
+    if (f & AMQP_BASIC_USER_ID_FLAG)
+        cJSON_AddItemToObject(props, "user_id", amqp_bytes_to_json(p->user_id));
+    if (f & AMQP_BASIC_APP_ID_FLAG)
+        cJSON_AddItemToObject(props, "app_id", amqp_bytes_to_json(p->app_id));
+    if (f & AMQP_BASIC_CLUSTER_ID_FLAG)
+        cJSON_AddItemToObject(props, "cluster_id", amqp_bytes_to_json(p->cluster_id));
+
+    if (f & AMQP_BASIC_HEADERS_FLAG) {
+        cJSON *headers = cJSON_CreateObject();
+        cJSON_AddItemToObject(props, "headers", headers);
+        for (int i = 0; i < p->headers.num_entries; i++) {
+            amqp_table_entry_t *e = &p->headers.entries[i];
+            /* Build key string */
+            char key[256] = {0};
+            size_t kn = e->key.len < sizeof(key) - 1 ? e->key.len : sizeof(key) - 1;
+            memcpy(key, e->key.bytes, kn);
+            key[kn] = '\0';
+
+            switch (e->value.kind) {
+            case AMQP_FIELD_KIND_UTF8:
+            case AMQP_FIELD_KIND_BYTES:
+                cJSON_AddItemToObject(headers, key,
+                    amqp_bytes_to_json(e->value.value.bytes));
+                break;
+            case AMQP_FIELD_KIND_I32:
+                cJSON_AddNumberToObject(headers, key, (double)e->value.value.i32);
+                break;
+            case AMQP_FIELD_KIND_I64:
+                cJSON_AddNumberToObject(headers, key, (double)e->value.value.i64);
+                break;
+            case AMQP_FIELD_KIND_F64:
+                cJSON_AddNumberToObject(headers, key, e->value.value.f64);
+                break;
+            case AMQP_FIELD_KIND_BOOLEAN:
+                cJSON_AddBoolToObject(headers, key, e->value.value.boolean);
+                break;
+            default: {
+                char kind_str[16];
+                snprintf(kind_str, sizeof(kind_str), "(kind=%c)", (char)e->value.kind);
+                cJSON_AddStringToObject(headers, key, kind_str);
+                break;
+            }
+            }
+        }
+    }
+
+    /* Payload */
+    cJSON_AddNumberToObject(root, "payload_size", (double)env->message.body.len);
+
+    if (env->message.body.len > 0 && env->message.body.bytes) {
+        /* Try to parse body as JSON; if valid, embed as object; otherwise as string */
+        char *body_str = malloc(env->message.body.len + 1);
+        if (body_str) {
+            memcpy(body_str, env->message.body.bytes, env->message.body.len);
+            body_str[env->message.body.len] = '\0';
+
+            cJSON *body_json = cJSON_Parse(body_str);
+            if (body_json) {
+                cJSON_AddItemToObject(root, "payload", body_json);
+            } else {
+                cJSON_AddStringToObject(root, "payload", body_str);
+            }
+            free(body_str);
+        }
+    } else {
+        cJSON_AddNullToObject(root, "payload");
+    }
+
+    /* Print as single line (unformatted) and write */
+    char *line = cJSON_PrintUnformatted(root);
+    if (line) {
+        fprintf(g_dbgfp, "%s\n", line);
+        fflush(g_dbgfp);
+        free(line);
+    }
+
+    cJSON_Delete(root);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Configuration structures                                           */
@@ -135,6 +306,7 @@ typedef struct {
 
 typedef struct {
     char         log_file[1024];
+    char         debug_log_file[1024];
     source_cfg_t source;
     dest_cfg_t   dest;
 } config_t;
@@ -205,9 +377,11 @@ static int parse_config(const char *path, config_t *cfg)
         return -1;
     }
 
-    /* log file */
+    /* log files */
     snprintf(cfg->log_file, sizeof(cfg->log_file), "%s",
              json_str(root, "log_file", ""));
+    snprintf(cfg->debug_log_file, sizeof(cfg->debug_log_file), "%s",
+             json_str(root, "debug_log_file", ""));
 
     /* source */
     const cJSON *src = cJSON_GetObjectItemCaseSensitive(root, "source");
@@ -375,25 +549,75 @@ static void amqp_disconnect(amqp_connection_state_t conn, const char *label)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Usage                                                              */
+/* ------------------------------------------------------------------ */
+static void print_usage(const char *prog)
+{
+    fprintf(stderr,
+        "Usage: %s -c <config.json> [-l <logfile>] [-d <debuglog>] [-h]\n"
+        "\n"
+        "Options:\n"
+        "  -c <path>   Configuration file (required)\n"
+        "  -l <path>   Log file (overrides config log_file)\n"
+        "  -d <path>   Debug payload log file (overrides config debug_log_file)\n"
+        "  -h          Show this help message\n",
+        prog);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 int main(int argc, char *argv[])
 {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <config.json>\n", argv[0]);
+    const char *config_path  = NULL;
+    const char *cli_log_path = NULL;
+    const char *cli_dbg_path = NULL;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "c:l:d:h")) != -1) {
+        switch (opt) {
+        case 'c': config_path  = optarg; break;
+        case 'l': cli_log_path = optarg; break;
+        case 'd': cli_dbg_path = optarg; break;
+        case 'h':
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
+        default:
+            print_usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (!config_path) {
+        fprintf(stderr, "ERROR: -c <config.json> is required\n\n");
+        print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
     /* ---- Parse config -------------------------------------------- */
     config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
-    if (parse_config(argv[1], &cfg) != 0)
+    if (parse_config(config_path, &cfg) != 0)
         return EXIT_FAILURE;
 
-    /* ---- Open log ------------------------------------------------ */
-    snprintf(g_log_path, sizeof(g_log_path), "%s", cfg.log_file);
+    /* ---- Resolve log paths (CLI overrides config) ---------------- */
+    if (cli_log_path)
+        snprintf(g_log_path, sizeof(g_log_path), "%s", cli_log_path);
+    else
+        snprintf(g_log_path, sizeof(g_log_path), "%s", cfg.log_file);
+
+    if (cli_dbg_path)
+        snprintf(g_dbg_path, sizeof(g_dbg_path), "%s", cli_dbg_path);
+    else
+        snprintf(g_dbg_path, sizeof(g_dbg_path), "%s", cfg.debug_log_file);
+
+    /* ---- Open logs ----------------------------------------------- */
     log_open();
-    LOG_INFO("rmq_bridge starting, config=%s", argv[1]);
+    dbg_open();
+
+    LOG_INFO("rmq_bridge starting, config=%s", config_path);
+    if (g_dbgfp)
+        LOG_INFO("debug payload logging enabled: %s", g_dbg_path);
 
     /* ---- Install signal handlers --------------------------------- */
     struct sigaction sa;
@@ -506,12 +730,13 @@ int main(int argc, char *argv[])
     int exit_code = EXIT_SUCCESS;
 
     while (!g_shutdown) {
-        /* Check if we need to reopen the log file (SIGHUP) */
+        /* Check if we need to reopen log files (SIGHUP) */
         if (g_reopen_log) {
             g_reopen_log = 0;
-            LOG_INFO("reopening log file (SIGHUP)");
+            LOG_INFO("reopening log files (SIGHUP)");
             log_reopen();
-            LOG_INFO("log file reopened");
+            dbg_reopen();
+            LOG_INFO("log files reopened");
         }
 
         /* Wait for a message with a timeout so we can check signals */
@@ -526,7 +751,7 @@ int main(int argc, char *argv[])
 
         if (reply.reply_type == AMQP_RESPONSE_LIBRARY_EXCEPTION) {
             if (reply.library_error == AMQP_STATUS_TIMEOUT) {
-                /* No message within timeout — loop back and check signals */
+                /* No message within timeout - loop back and check signals */
                 continue;
             }
             /* Real connection error */
@@ -541,7 +766,7 @@ int main(int argc, char *argv[])
             break;
         }
 
-        /* We have a message — extract routing key and body */
+        /* We have a message - extract routing key and body */
         char routing_key[512] = {0};
         size_t rk_len = envelope.routing_key.len < sizeof(routing_key) - 1
                             ? envelope.routing_key.len
@@ -552,6 +777,9 @@ int main(int argc, char *argv[])
         LOG_INFO("received message: exchange='%.*s' routing_key='%s' size=%lu",
                  (int)envelope.exchange.len, (char *)envelope.exchange.bytes,
                  routing_key, (unsigned long)envelope.message.body.len);
+
+        /* Debug log the full message with all properties */
+        debug_log_message(&envelope);
 
         /* Publish body to destination */
         amqp_basic_properties_t props;
@@ -604,6 +832,8 @@ int main(int argc, char *argv[])
 
     if (g_logfp && g_logfp != stderr)
         fclose(g_logfp);
+    if (g_dbgfp)
+        fclose(g_dbgfp);
 
     return exit_code;
 }
