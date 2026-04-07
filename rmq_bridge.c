@@ -751,7 +751,21 @@ int main(int argc, char *argv[])
 
         if (reply.reply_type == AMQP_RESPONSE_LIBRARY_EXCEPTION) {
             if (reply.library_error == AMQP_STATUS_TIMEOUT) {
-                /* No message within timeout - loop back and check signals */
+                /* No message within timeout.
+                 * Service the destination connection so heartbeat
+                 * frames get sent/received even when idle. */
+                amqp_maybe_release_buffers(dst_conn);
+                amqp_frame_t dst_frame;
+                struct timeval dst_tv = {0, 0}; /* zero = non-blocking poll */
+                int dst_rc = amqp_simple_wait_frame_noblock(dst_conn,
+                                                            &dst_frame, &dst_tv);
+                if (dst_rc != AMQP_STATUS_OK &&
+                    dst_rc != AMQP_STATUS_TIMEOUT) {
+                    LOG_ERROR("destination connection lost during idle: %s",
+                              amqp_error_string2(dst_rc));
+                    exit_code = EXIT_FAILURE;
+                    break;
+                }
                 continue;
             }
             /* Real connection error */
@@ -837,3 +851,4 @@ int main(int argc, char *argv[])
 
     return exit_code;
 }
+
