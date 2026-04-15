@@ -211,14 +211,20 @@ SIGHUP reopens both the main log and the debug log, so both can be rotated.
 Example `/etc/logrotate.d/rmq_bridge`:
 
 ```
-/var/log/rmq_bridge.log /var/log/rmq_bridge_debug.log {
+/var/log/rmq_bridge/*.log {
     daily
-    rotate 7
+    rotate 14
     compress
+    delaycompress
     missingok
     notifempty
+    nocopy
+    dateext
+    dateformat -%Y-%m-%d
+    sharedscripts
     postrotate
-        systemctl reload rmq_bridge 2>/dev/null || true
+        killall -s HUP rmq_bridge 2>/dev/null || true
     endscript
 }
+
 ```
