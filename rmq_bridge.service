@@ -1,6 +1,6 @@
 [Unit]
 Description=RabbitMQ Message Bridge
-Documentation=https://github.com/your-org/rmq_bridge
+Documentation=https://github.com/hmmhesays/rmq_bridge
 After=network-online.target
 Wants=network-online.target
 
