@@ -1,0 +1,30 @@
+[Unit]
+Description=RabbitMQ Message Bridge (%i)
+Documentation=https://github.com/hmmhesays/rmq_bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/rmq_bridge
+ExecStartPre=/usr/bin/mkdir -p /var/log/rmq_bridge
+ExecStart=/opt/rmq_bridge/rmq_bridge -c /opt/rmq_bridge/%i.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=null
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/rmq_bridge
+ReadOnlyPaths=/opt/rmq_bridge
+
+[Install]
+WantedBy=multi-user.target
